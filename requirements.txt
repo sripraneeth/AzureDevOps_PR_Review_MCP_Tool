@@ -1,0 +1,4 @@
+# Required packages for Azure DevOps PR Analysis Tool
+requests>=2.31.0          # For Azure DevOps API calls
+python-dotenv>=1.0.0      # For environment variable handling
+mcp[cli]>=1.4.0           # For MCP server functionality

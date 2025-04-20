@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+Azure DevOps API client for PR analysis.
+This module handles all Azure DevOps API interactions.
+"""
+
+import sys
+import os
+import traceback
+import datetime
+import base64
+from typing import Any, Dict
+import requests
+
+class AzureDevOpsClient:
+    """Client for interacting with Azure DevOps API."""
+    
+    def __init__(self, pat=None):
+        """Initialize the Azure DevOps client with a PAT."""
+        self.pat = pat or os.getenv('AZURE_PAT')
+        if not self.pat:
+            raise ValueError("Azure DevOps PAT is required. Set AZURE_PAT environment variable or pass it directly.")
+        
+        print(f"Azure DevOps client initialized with PAT length: {len(self.pat)}", file=sys.stderr)
+    
+    def _get_auth_header(self):
+        """Create the authentication header for Azure DevOps API."""
+        try:
+            # Basic authentication with empty username
+            # This is the standard format: "Basic base64(:'PAT')"
+            pat_with_colon = f":{self.pat}"
+            encoded_pat = base64.b64encode(pat_with_colon.encode('utf-8')).decode('utf-8')
+            auth_header = {'Authorization': f'Basic {encoded_pat}'}
+            return auth_header
+        except Exception as e:
+            print(f"Error creating authentication header: {str(e)}", file=sys.stderr)
+            # Fall back to using PAT directly
+            return {'Authorization': f'Basic {self.pat}'}
+    
+    def fetch_pr_changes(self, organization: str, project: str, repository: str, pr_id: int) -> Dict[str, Any]:
+        """Fetch changes from an Azure DevOps pull request."""
+        print(f"Fetching PR #{pr_id} from {organization}/{project}/{repository}", file=sys.stderr)
+        
+        try:
+            # Get authentication header
+            auth_header = self._get_auth_header()
+            
+            # Azure DevOps API base URL
+            base_url = f"https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{repository}"
+            
+            # Get PR metadata
+            pr_url = f"{base_url}/pullRequests/{pr_id}?api-version=6.0"
+            print(f"Making API request to: {pr_url}", file=sys.stderr)
+            pr_response = requests.get(pr_url, headers=auth_header)
+            pr_response.raise_for_status()
+            pr_data = pr_response.json()
+            
+            # Get file changes - Azure DevOps uses 'iterations' API to get changes
+            iterations_url = f"{base_url}/pullRequests/{pr_id}/iterations?api-version=6.0"
+            print(f"Making API request to: {iterations_url}", file=sys.stderr)
+            iterations_response = requests.get(iterations_url, headers=auth_header)
+            iterations_response.raise_for_status()
+            iterations_data = iterations_response.json()
+            
+            # Get the latest iteration
+            if iterations_data['count'] > 0:
+                latest_iteration = iterations_data['value'][-1]['id']
+                
+                # Get changes for the latest iteration
+                changes_url = f"{base_url}/pullRequests/{pr_id}/iterations/{latest_iteration}/changes?api-version=6.0"
+                print(f"Making API request to: {changes_url}", file=sys.stderr)
+                changes_response = requests.get(changes_url, headers=auth_header)
+                changes_response.raise_for_status()
+                changes_data = changes_response.json()
+                
+                # Process file changes
+                changes = []
+                for change in changes_data.get('changes', []):
+                    if 'item' in change:
+                        item = change['item']
+                        change_info = {
+                            'filename': item.get('path', ''),
+                            'status': change.get('changeType', ''),  # add, edit, delete
+                            'isFolder': item.get('isFolder', False),
+                            'contentId': item.get('contentId', ''),
+                            'originalPath': item.get('originalPath', ''),
+                            'url': item.get('url', '')
+                        }
+                        changes.append(change_info)
+                
+                # Build the PR info object
+                pr_info = {
+                    'title': pr_data['title'],
+                    'description': pr_data['description'],
+                    'author': pr_data['createdBy']['displayName'],
+                    'author_email': pr_data['createdBy'].get('uniqueName', ''),
+                    'created_at': pr_data['creationDate'],
+                    'updated_at': pr_data.get('lastMergeSourceCommit', {}).get('commitId', ''),
+                    'status': pr_data['status'],
+                    'sourceRefName': pr_data['sourceRefName'],
+                    'targetRefName': pr_data['targetRefName'],
+                    'total_changes': len(changes),
+                    'changes': changes,
+                    'organization': organization,
+                    'project': project,
+                    'repository': repository,
+                    'pr_id': pr_id,
+                    'latest_iteration': latest_iteration
+                }
+                
+                print(f"Successfully fetched {len(changes)} changes", file=sys.stderr)
+                return pr_info
+            else:
+                print("No iterations found for this PR", file=sys.stderr)
+                return {'error': 'No iterations found for this PR'}
+            
+        except Exception as e:
+            print(f"Error fetching PR changes: {str(e)}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            return {'error': str(e)}
+    
+    def fetch_file_content(self, organization: str, project: str, repository: str, file_path: str, commit_id: str) -> str:
+        """Fetch content of a specific file at a given commit."""
+        print(f"Fetching content for file: {file_path} at commit: {commit_id}", file=sys.stderr)
+        
+        try:
+            # Get authentication header
+            auth_header = self._get_auth_header()
+            
+            # Azure DevOps API to get file content
+            content_url = f"https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{repository}/items?path={file_path}&versionDescriptor.version={commit_id}&api-version=6.0"
+            
+            response = requests.get(content_url, headers=auth_header)
+            response.raise_for_status()
+            return response.text
+        except Exception as e:
+            print(f"Error fetching file content: {str(e)}", file=sys.stderr)
+            return f"Error: {str(e)}"
+    
+    def fetch_file_diff(self, organization: str, project: str, repository: str, pr_id: int, iteration_id: int, file_path: str) -> Dict[str, Any]:
+        """Fetch the diff of a specific file in a PR."""
+        print(f"Fetching diff for file: {file_path} in PR: {pr_id}, iteration: {iteration_id}", file=sys.stderr)
+        
+        try:
+            # Get authentication header
+            auth_header = self._get_auth_header()
+            
+            # Azure DevOps API to get file diff
+            diff_url = f"https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{repository}/pullRequests/{pr_id}/iterations/{iteration_id}/changes?api-version=6.0&path={file_path}"
+            
+            response = requests.get(diff_url, headers=auth_header)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"Error fetching file diff: {str(e)}", file=sys.stderr)
+            return {"error": str(e)}
+
+# Singleton instance for easy importing
+def get_client():
+    """Get or create the AzureDevOpsClient singleton instance."""
+    if not hasattr(get_client, 'instance'):
+        get_client.instance = AzureDevOpsClient()
+    return get_client.instance
